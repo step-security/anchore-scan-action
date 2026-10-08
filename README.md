@@ -1,0 +1,1 @@
+# anchore-scan-action
