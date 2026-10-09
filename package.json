@@ -1,6 +1,6 @@
 {
 	"name": "anchore-scan-action",
-	"version": "2.0.2",
+	"version": "7.4.2",
 	"description": "Anchore image scan github action",
 	"type": "module",
 	"main": "index.js",

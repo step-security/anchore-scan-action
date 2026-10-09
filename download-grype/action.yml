@@ -1,5 +1,5 @@
 name: "Download Grype"
-author: "Anchore"
+author: "step-security"
 description: "Downloads the Grype binary and provides a path to execute it"
 branding:
   color: blue
