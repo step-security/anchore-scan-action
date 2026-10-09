@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { mock } from "./mocks.js";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+import { mock, tmpdir } from "./mocks.js";
 import { GRYPE_VERSION } from "../GrypeVersion.js";
 
 let imports = 0;
@@ -8,14 +12,43 @@ let imports = 0;
 // installs grype with the download and exec calls mocked out, returning the
 // installer URL that was fetched and the environment the installer ran with
 async function mockInstall(version) {
-  let downloadedUrl;
+  const dir = tmpdir();
+  const fakeContent = Buffer.from("fake-grype-binary");
+  const fakeHash = crypto
+    .createHash("sha256")
+    .update(fakeContent)
+    .digest("hex");
+  const versionNoV = version.replace(/^v/, "");
+  const platformMap = { linux: "linux", darwin: "darwin" };
+  const archMap = { x64: "amd64", arm64: "arm64" };
+  const platform = platformMap[process.platform] ?? "linux";
+  const arch = archMap[process.arch] ?? "amd64";
+  const archiveFilename = `grype_${versionNoV}_${platform}_${arch}.tar.gz`;
+  const checksumsContent = `${fakeHash}  ${archiveFilename}\n`;
+
+  const checksumsFile = path.join(dir, "checksums.txt");
+  const archiveFile = path.join(dir, "archive.tar.gz");
+  fs.writeFileSync(checksumsFile, checksumsContent);
+  fs.writeFileSync(archiveFile, fakeContent);
+
+  let installScriptUrl;
   await mock("@actions/tool-cache", {
     find() {
       return "";
     },
     downloadTool(url) {
-      downloadedUrl = url;
-      return "install-script-path";
+      if (url.includes("install.sh")) {
+        installScriptUrl = url;
+        return "install-script-path";
+      }
+      if (url.includes("checksums.txt")) {
+        return checksumsFile;
+      }
+      return archiveFile;
+    },
+    async extractTar(archivePath, extractDir) {
+      fs.writeFileSync(path.join(extractDir, "grype"), fakeContent);
+      return extractDir;
     },
     cacheFile() {
       return "grype";
@@ -26,6 +59,12 @@ async function mockInstall(version) {
   await mock("@actions/exec", {
     async exec(cmd, args, options) {
       env = options.env;
+      // simulate install.sh writing the binary to installToDir
+      // args: [installScriptPath, "-d", "-b", installToDir, version]
+      const installToDir = args[3];
+      if (installToDir) {
+        fs.writeFileSync(path.join(installToDir, "grype"), fakeContent);
+      }
       return 0;
     },
   });
@@ -34,7 +73,7 @@ async function mockInstall(version) {
   const { installGrype } = await import(`../action.js?i=${imports++}`);
   await installGrype(version);
 
-  return { downloadedUrl, env };
+  return { downloadedUrl: installScriptUrl, env };
 }
 
 describe("installing grype", () => {
