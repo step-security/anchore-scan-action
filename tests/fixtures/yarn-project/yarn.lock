@@ -42,7 +42,7 @@ react@16:
     object-assign "^4.1.1"
     prop-types "^15.6.2"
 
-trim@0.0.2:
-  version "0.0.2"
-  resolved "https://registry.yarnpkg.com/trim/-/trim-0.0.2.tgz#b41afc68d6b5fc1a1fceb47b2ac91da258a071d4"
-  integrity sha512-kTIK/cS0xM3jxJ7toUHlFTxHgix/kmmBgOiqc0gUAoW+NjIRsMB3vkjgAth5XEghYFCQxOdF0p/PHrv1BqTHgA==
+trim@1.0.1:
+  version "1.0.1"
+  resolved "https://registry.yarnpkg.com/trim/-/trim-1.0.1.tgz#68e78f6178ccab9687a610752f4f5e5a7022ee8c"
+  integrity sha512-3JVP2YVqITUisXblCDq/Bi4P9457G/sdEamInkyvCsjbTcXLXIiG7XCb4kGMFWh6JGXesS3TKxOPtrncN/xe8w==
