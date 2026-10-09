@@ -1,0 +1,3 @@
+[[IgnoredVulns]]
+id = "GHSA-w5p7-h5w8-2hfq"
+reason = "Vulnerability in test fixture (trim@0.0.2 in tests/fixtures/yarn-project), not used in production"

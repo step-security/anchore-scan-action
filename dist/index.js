@@ -1864,10 +1864,66 @@ var require_request = __commonJS({
           return false;
         }
       }
-      onUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number|null} statusCode
+       * @param {Buffer[]|null} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert4(!this.aborted);
         assert4(!this.completed);
-        return this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (statusCode !== null) {
+          this.#publishUpgradeHeaders(statusCode, headers, statusText);
+        }
+        const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (statusCode !== null) {
+            this.#publishUpgradeTrailers();
+          }
+        }
+        return result;
+      }
+      /**
+       * @param {number} statusCode
+       * @param {import('node:http2').IncomingHttpHeaders} headers
+       * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+       * @param {string} [statusText]
+       */
+      onUpgradeResponse(statusCode, headers, parseHeaders, statusText = "") {
+        assert4(!this.aborted);
+        assert4(this.completed);
+        if (channels.headers.hasSubscribers) {
+          this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText);
+        }
+        this.#publishUpgradeTrailers();
+      }
+      /**
+       * @param {Error} error
+       */
+      onUpgradeError(error2) {
+        assert4(!this.aborted);
+        assert4(this.completed);
+        if (channels.error.hasSubscribers) {
+          channels.error.publish({ request: this, error: error2 });
+        }
+      }
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]} headers
+       * @param {string} statusText
+       */
+      #publishUpgradeHeaders(statusCode, headers, statusText) {
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
+      }
+      #publishUpgradeTrailers() {
+        if (channels.trailers.hasSubscribers) {
+          channels.trailers.publish({ request: this, trailers: [] });
+        }
       }
       onComplete(trailers) {
         this.onFinally();
@@ -1934,7 +1990,11 @@ var require_request = __commonJS({
           } else if (typeof val[i] === "object") {
             throw new InvalidArgumentError(`invalid ${key} header`);
           } else {
-            arr.push(`${val[i]}`);
+            const str = `${val[i]}`;
+            if (!isValidHeaderValue(str)) {
+              throw new InvalidArgumentError(`invalid ${key} header`);
+            }
+            arr.push(str);
           }
         }
         val = arr;
@@ -1946,6 +2006,9 @@ var require_request = __commonJS({
         val = "";
       } else {
         val = `${val}`;
+        if (!isValidHeaderValue(val)) {
+          throw new InvalidArgumentError(`invalid ${key} header`);
+        }
       }
       if (headerName === "host") {
         if (request.host !== null) {
@@ -2055,13 +2118,21 @@ var require_dispatcher_base = __commonJS({
     var kOnDestroyed = /* @__PURE__ */ Symbol("onDestroyed");
     var kOnClosed = /* @__PURE__ */ Symbol("onClosed");
     var kInterceptedDispatch = /* @__PURE__ */ Symbol("Intercepted Dispatch");
+    var kWebSocketOptions = /* @__PURE__ */ Symbol("webSocketOptions");
     var DispatcherBase = class extends Dispatcher {
-      constructor() {
+      constructor(opts) {
         super();
         this[kDestroyed] = false;
         this[kOnDestroyed] = null;
         this[kClosed] = false;
         this[kOnClosed] = [];
+        this[kWebSocketOptions] = opts?.webSocket ?? {};
+      }
+      get webSocketOptions() {
+        return {
+          maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
+          maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+        };
       }
       get destroyed() {
         return this[kDestroyed];
@@ -5668,6 +5739,7 @@ var require_client_h1 = __commonJS({
       RequestContentLengthMismatchError,
       ResponseContentLengthMismatchError,
       RequestAbortedError,
+      InvalidArgumentError,
       HeadersTimeoutError,
       HeadersOverflowError,
       SocketError,
@@ -5714,6 +5786,9 @@ var require_client_h1 = __commonJS({
     var FastBuffer = Buffer[Symbol.species];
     var addListener = util9.addListener;
     var removeAllListeners = util9.removeAllListeners;
+    var kIdleSocketValidation = /* @__PURE__ */ Symbol("kIdleSocketValidation");
+    var kIdleSocketValidationTimeout = /* @__PURE__ */ Symbol("kIdleSocketValidationTimeout");
+    var kSocketUsed = /* @__PURE__ */ Symbol("kSocketUsed");
     var extractBody;
     async function lazyllhttp() {
       const llhttpWasmData = process.env.JEST_WORKER_ID ? require_llhttp_wasm() : void 0;
@@ -5876,23 +5951,54 @@ var require_client_h1 = __commonJS({
             currentBufferRef = null;
           }
           const offset = llhttp.llhttp_get_error_pos(this.ptr) - currentBufferPtr;
-          if (ret === constants4.ERROR.PAUSED_UPGRADE) {
-            this.onUpgrade(data.slice(offset));
-          } else if (ret === constants4.ERROR.PAUSED) {
-            this.paused = true;
-            socket.unshift(data.slice(offset));
-          } else if (ret !== constants4.ERROR.OK) {
-            const ptr = llhttp.llhttp_get_error_reason(this.ptr);
-            let message = "";
-            if (ptr) {
-              const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0);
-              message = "Response does not match the HTTP/1.1 protocol (" + Buffer.from(llhttp.memory.buffer, ptr, len).toString() + ")";
+          if (ret !== constants4.ERROR.OK) {
+            const body2 = data.subarray(offset);
+            if (ret === constants4.ERROR.PAUSED_UPGRADE) {
+              this.onUpgrade(body2);
+            } else if (ret === constants4.ERROR.PAUSED) {
+              this.paused = true;
+              socket.unshift(body2);
+            } else {
+              throw this.createError(ret, body2);
             }
-            throw new HTTPParserError(message, constants4.ERROR[ret], data.slice(offset));
           }
         } catch (err) {
           util9.destroy(socket, err);
         }
+      }
+      finish() {
+        assert4(currentParser === null);
+        assert4(this.ptr != null);
+        assert4(!this.paused);
+        const { llhttp } = this;
+        let ret;
+        try {
+          currentParser = this;
+          ret = llhttp.llhttp_finish(this.ptr);
+        } finally {
+          currentParser = null;
+        }
+        if (ret === constants4.ERROR.OK) {
+          return null;
+        }
+        if (ret === constants4.ERROR.PAUSED || ret === constants4.ERROR.PAUSED_UPGRADE) {
+          this.paused = true;
+          return null;
+        }
+        return this.createError(ret, EMPTY_BUF);
+      }
+      createError(ret, data) {
+        const { llhttp, contentLength: contentLength2, bytesRead } = this;
+        if (contentLength2 && bytesRead !== parseInt(contentLength2, 10)) {
+          return new ResponseContentLengthMismatchError();
+        }
+        const ptr = llhttp.llhttp_get_error_reason(this.ptr);
+        let message = "";
+        if (ptr) {
+          const len = new Uint8Array(llhttp.memory.buffer, ptr).indexOf(0);
+          message = "Response does not match the HTTP/1.1 protocol (" + Buffer.from(llhttp.memory.buffer, ptr, len).toString() + ")";
+        }
+        return new HTTPParserError(message, constants4.ERROR[ret], data);
       }
       destroy() {
         assert4(this.ptr != null);
@@ -5911,6 +6017,10 @@ var require_client_h1 = __commonJS({
       onMessageBegin() {
         const { socket, client } = this;
         if (socket.destroyed) {
+          return -1;
+        }
+        if (client[kRunning] === 0) {
+          util9.destroy(socket, new SocketError("bad response", util9.getSocketInfo(socket)));
           return -1;
         }
         const request = client[kQueue][client[kRunningIdx]];
@@ -5956,7 +6066,7 @@ var require_client_h1 = __commonJS({
         }
       }
       onUpgrade(head) {
-        const { upgrade, client, socket, headers, statusCode } = this;
+        const { upgrade, client, socket, headers, statusCode, statusText } = this;
         assert4(upgrade);
         assert4(client[kSocket] === socket);
         assert4(!socket.destroyed);
@@ -5981,15 +6091,20 @@ var require_client_h1 = __commonJS({
         client[kQueue][client[kRunningIdx]++] = null;
         client.emit("disconnect", client[kUrl], [client], new InformationalError("upgrade"));
         try {
-          request.onUpgrade(statusCode, headers, socket);
-        } catch (err) {
-          util9.destroy(socket, err);
+          request.onUpgrade(statusCode, headers, socket, statusText);
+        } catch (error2) {
+          util9.errorRequest(client, request, error2);
+          util9.destroy(socket, error2);
         }
         client[kResume]();
       }
       onHeadersComplete(statusCode, upgrade, shouldKeepAlive) {
         const { client, socket, headers, statusText } = this;
         if (socket.destroyed) {
+          return -1;
+        }
+        if (client[kRunning] === 0) {
+          util9.destroy(socket, new SocketError("bad response", util9.getSocketInfo(socket)));
           return -1;
         }
         const request = client[kQueue][client[kRunningIdx]];
@@ -6117,6 +6232,7 @@ var require_client_h1 = __commonJS({
         }
         request.onComplete(headers);
         client[kQueue][client[kRunningIdx]++] = null;
+        socket[kSocketUsed] = true;
         if (socket[kWriting]) {
           assert4(client[kRunning] === 0);
           util9.destroy(socket, new InformationalError("reset"));
@@ -6160,12 +6276,19 @@ var require_client_h1 = __commonJS({
       socket[kWriting] = false;
       socket[kReset] = false;
       socket[kBlocking] = false;
+      socket[kIdleSocketValidation] = 0;
+      socket[kIdleSocketValidationTimeout] = null;
+      socket[kSocketUsed] = false;
       socket[kParser] = new Parser(client, socket, llhttpInstance);
       addListener(socket, "error", function(err) {
         assert4(err.code !== "ERR_TLS_CERT_ALTNAME_INVALID");
         const parser = this[kParser];
         if (err.code === "ECONNRESET" && parser.statusCode && !parser.shouldKeepAlive) {
-          parser.onMessageComplete();
+          const parserErr = parser.finish();
+          if (parserErr) {
+            this[kError] = parserErr;
+            this[kClient][kOnError](parserErr);
+          }
           return;
         }
         this[kError] = err;
@@ -6180,7 +6303,10 @@ var require_client_h1 = __commonJS({
       addListener(socket, "end", function() {
         const parser = this[kParser];
         if (parser.statusCode && !parser.shouldKeepAlive) {
-          parser.onMessageComplete();
+          const parserErr = parser.finish();
+          if (parserErr) {
+            util9.destroy(this, parserErr);
+          }
           return;
         }
         util9.destroy(this, new SocketError("other side closed", util9.getSocketInfo(this)));
@@ -6188,9 +6314,10 @@ var require_client_h1 = __commonJS({
       addListener(socket, "close", function() {
         const client2 = this[kClient];
         const parser = this[kParser];
+        clearIdleSocketValidation(this);
         if (parser) {
           if (!this[kError] && parser.statusCode && !parser.shouldKeepAlive) {
-            parser.onMessageComplete();
+            this[kError] = parser.finish() || this[kError];
           }
           this[kParser].destroy();
           this[kParser] = null;
@@ -6239,7 +6366,7 @@ var require_client_h1 = __commonJS({
           return socket.destroyed;
         },
         busy(request) {
-          if (socket[kWriting] || socket[kReset] || socket[kBlocking]) {
+          if (socket[kWriting] || socket[kReset] || socket[kBlocking] || socket[kIdleSocketValidation] === 1) {
             return true;
           }
           if (request) {
@@ -6257,6 +6384,23 @@ var require_client_h1 = __commonJS({
         }
       };
     }
+    function clearIdleSocketValidation(socket) {
+      if (socket[kIdleSocketValidationTimeout]) {
+        clearImmediate(socket[kIdleSocketValidationTimeout]);
+        socket[kIdleSocketValidationTimeout] = null;
+      }
+      socket[kIdleSocketValidation] = 0;
+    }
+    function scheduleIdleSocketValidation(client, socket) {
+      socket[kIdleSocketValidation] = 1;
+      socket[kIdleSocketValidationTimeout] = setImmediate(() => {
+        socket[kIdleSocketValidationTimeout] = null;
+        socket[kIdleSocketValidation] = 2;
+        if (client[kSocket] === socket && !socket.destroyed) {
+          client[kResume]();
+        }
+      });
+    }
     function resumeH1(client) {
       const socket = client[kSocket];
       if (socket && !socket.destroyed) {
@@ -6268,6 +6412,29 @@ var require_client_h1 = __commonJS({
         } else if (socket[kNoRef] && socket.ref) {
           socket.ref();
           socket[kNoRef] = false;
+        }
+        if (client[kRunning] === 0 && client[kPending] > 0 && socket[kSocketUsed]) {
+          if (socket[kIdleSocketValidation] === 0) {
+            scheduleIdleSocketValidation(client, socket);
+            socket[kParser].readMore();
+            if (socket.destroyed) {
+              return;
+            }
+            return;
+          }
+          if (socket[kIdleSocketValidation] === 1) {
+            socket[kParser].readMore();
+            if (socket.destroyed) {
+              return;
+            }
+            return;
+          }
+        }
+        if (client[kRunning] === 0) {
+          socket[kParser].readMore();
+          if (socket.destroyed) {
+            return;
+          }
         }
         if (client[kSize] === 0) {
           if (socket[kParser].timeoutType !== TIMEOUT_KEEP_ALIVE) {
@@ -6299,8 +6466,16 @@ var require_client_h1 = __commonJS({
         }
         body2 = bodyStream.stream;
         contentLength2 = bodyStream.length;
-      } else if (util9.isBlobLike(body2) && request.contentType == null && body2.type) {
-        headers.push("content-type", body2.type);
+      } else if (util9.isBlobLike(body2) && request.contentType == null) {
+        const contentType2 = body2.type;
+        if (contentType2) {
+          const contentTypeValue = `${contentType2}`;
+          if (!util9.isValidHeaderValue(contentTypeValue)) {
+            util9.errorRequest(client, request, new InvalidArgumentError("invalid content-type header"));
+            return false;
+          }
+          headers.push("content-type", contentTypeValue);
+        }
       }
       if (body2 && typeof body2.read === "function") {
         body2.read(0);
@@ -6321,11 +6496,18 @@ var require_client_h1 = __commonJS({
         process.emitWarning(new RequestContentLengthMismatchError());
       }
       const socket = client[kSocket];
-      const abort = (err) => {
-        if (request.aborted || request.completed) {
+      clearIdleSocketValidation(socket);
+      const abort = (error2) => {
+        if (request.aborted) {
           return;
         }
-        util9.errorRequest(client, request, err || new RequestAbortedError());
+        if (request.completed) {
+          if (request.upgrade || request.method === "CONNECT") {
+            util9.destroy(socket, new InformationalError("aborted"));
+          }
+          return;
+        }
+        util9.errorRequest(client, request, error2 || new RequestAbortedError());
         util9.destroy(body2);
         util9.destroy(socket, new InformationalError("aborted"));
       };
@@ -6681,6 +6863,7 @@ var require_client_h2 = __commonJS({
   "node_modules/undici/lib/dispatcher/client-h2.js"(exports2, module) {
     "use strict";
     var assert4 = __require("node:assert");
+    var { errorMonitor } = __require("node:events");
     var { pipeline: pipeline3 } = __require("node:stream");
     var util9 = require_util();
     var {
@@ -6740,6 +6923,10 @@ var require_client_h2 = __commonJS({
         }
       }
       return result;
+    }
+    function parseH2ResponseHeaders(headers) {
+      const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers;
+      return parseH2Headers(realHeaders);
     }
     async function connectH2(client, socket) {
       client[kSocket] = socket;
@@ -6904,16 +7091,22 @@ var require_client_h2 = __commonJS({
       const { hostname, port } = client[kUrl];
       headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ""}`;
       headers[HTTP2_HEADER_METHOD] = method;
-      const abort = (err) => {
-        if (request.aborted || request.completed) {
+      const abort = (error2) => {
+        if (request.aborted) {
           return;
         }
-        err = err || new RequestAbortedError();
-        util9.errorRequest(client, request, err);
-        if (stream7 != null) {
-          util9.destroy(stream7, err);
+        if (request.completed) {
+          if (method === "CONNECT" && stream7 != null) {
+            util9.destroy(stream7, error2 || new RequestAbortedError());
+          }
+          return;
         }
-        util9.destroy(body2, err);
+        error2 = error2 || new RequestAbortedError();
+        util9.errorRequest(client, request, error2);
+        if (stream7 != null) {
+          util9.destroy(stream7, error2);
+        }
+        util9.destroy(body2, error2);
         client[kQueue][client[kRunningIdx]++] = null;
         client[kResume]();
       };
@@ -6928,18 +7121,42 @@ var require_client_h2 = __commonJS({
       if (method === "CONNECT") {
         session.ref();
         stream7 = session.request(headers, { endStream: false, signal });
-        if (stream7.id && !stream7.pending) {
-          request.onUpgrade(null, null, stream7);
-          ++session[kOpenStreams];
-          client[kQueue][client[kRunningIdx]++] = null;
-        } else {
-          stream7.once("ready", () => {
+        let upgradeResponseFinished = false;
+        const onResponse = (headers2) => {
+          upgradeResponseFinished = true;
+          stream7.off(errorMonitor, onUpgradeError);
+          request.onUpgradeResponse(Number(headers2[HTTP2_HEADER_STATUS]), headers2, parseH2ResponseHeaders);
+        };
+        const onUpgradeError = (error2) => {
+          upgradeResponseFinished = true;
+          stream7.off("response", onResponse);
+          request.onUpgradeError(error2);
+        };
+        const onReady = () => {
+          try {
             request.onUpgrade(null, null, stream7);
-            ++session[kOpenStreams];
-            client[kQueue][client[kRunningIdx]++] = null;
-          });
-        }
+          } catch (error2) {
+            stream7.off("response", onResponse);
+            abort(error2);
+            return;
+          }
+          if (request.aborted) {
+            return;
+          }
+          stream7.off("error", abort);
+          stream7.once(errorMonitor, onUpgradeError);
+          client[kQueue][client[kRunningIdx]++] = null;
+        };
+        stream7.once("response", onResponse);
+        stream7.once("error", abort);
+        ++session[kOpenStreams];
+        onReady();
         stream7.once("close", () => {
+          if (!upgradeResponseFinished && request.completed) {
+            stream7.off("response", onResponse);
+            stream7.off(errorMonitor, onUpgradeError);
+            request.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream7.rstCode}`));
+          }
           session[kOpenStreams] -= 1;
           if (session[kOpenStreams] === 0) session.unref();
         });
@@ -7500,9 +7717,10 @@ var require_client = __commonJS({
         autoSelectFamilyAttemptTimeout,
         // h2
         maxConcurrentStreams,
-        allowH2
+        allowH2,
+        webSocket
       } = {}) {
-        super();
+        super({ webSocket });
         if (keepAlive !== void 0) {
           throw new InvalidArgumentError("unsupported keepAlive, use pipelining=0 instead");
         }
@@ -8008,8 +8226,8 @@ var require_pool_base = __commonJS({
     var kRemoveClient = /* @__PURE__ */ Symbol("remove client");
     var kStats = /* @__PURE__ */ Symbol("stats");
     var PoolBase = class extends DispatcherBase {
-      constructor() {
-        super();
+      constructor(opts) {
+        super(opts);
         this[kQueue] = new FixedQueue();
         this[kClients] = [];
         this[kQueued] = 0;
@@ -8180,7 +8398,6 @@ var require_pool = __commonJS({
         allowH2,
         ...options
       } = {}) {
-        super();
         if (connections != null && (!Number.isFinite(connections) || connections < 0)) {
           throw new InvalidArgumentError("invalid connections");
         }
@@ -8201,6 +8418,7 @@ var require_pool = __commonJS({
             ...connect
           });
         }
+        super(options);
         this[kInterceptors] = options.interceptors?.Pool && Array.isArray(options.interceptors.Pool) ? options.interceptors.Pool : [];
         this[kConnections] = connections || null;
         this[kUrl] = util9.parseOrigin(origin2);
@@ -8400,7 +8618,6 @@ var require_agent = __commonJS({
     }
     var Agent3 = class extends DispatcherBase {
       constructor({ factory: factory2 = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-        super();
         if (typeof factory2 !== "function") {
           throw new InvalidArgumentError("factory must be a function.");
         }
@@ -8410,6 +8627,7 @@ var require_agent = __commonJS({
         if (!Number.isInteger(maxRedirections) || maxRedirections < 0) {
           throw new InvalidArgumentError("maxRedirections must be a positive number");
         }
+        super(options);
         if (connect && typeof connect !== "function") {
           connect = { ...connect };
         }
@@ -8850,6 +9068,24 @@ var require_retry_handler = __commonJS({
       const current = Date.now();
       return new Date(retryAfter).getTime() - current;
     }
+    function validatePartialResponseContentLength(headers, range2, statusCode, retryCount) {
+      const contentLength2 = headers["content-length"];
+      if (contentLength2 == null) {
+        return null;
+      }
+      if (!Number.isFinite(range2.start) || !Number.isFinite(range2.end)) {
+        return null;
+      }
+      const length = Number(contentLength2);
+      const expectedLength = range2.end - range2.start + 1;
+      if (!Number.isFinite(length) || length !== expectedLength) {
+        return new RequestRetryError("Content-Length mismatch", statusCode, {
+          headers,
+          data: { count: retryCount }
+        });
+      }
+      return null;
+    }
     var RetryHandler = class _RetryHandler {
       constructor(opts, handlers) {
         const { retryOptions, ...dispatchOpts } = opts;
@@ -8903,6 +9139,7 @@ var require_retry_handler = __commonJS({
         this.end = null;
         this.etag = null;
         this.resume = null;
+        this.headersSent = false;
         this.handler.onConnect((reason) => {
           this.aborted = true;
           if (this.abort) {
@@ -8911,6 +9148,17 @@ var require_retry_handler = __commonJS({
             this.reason = reason;
           }
         });
+      }
+      checkpointResponseEnd(headers, resume) {
+        if (this.end == null && this.opts.method !== "HEAD") {
+          const contentLength2 = headers["content-length"];
+          this.end = contentLength2 != null ? Number(contentLength2) - 1 : null;
+          assert4(
+            this.end == null || Number.isFinite(this.end),
+            "invalid content-length"
+          );
+        }
+        this.resume = this.end != null ? resume : null;
       }
       onRequestSent() {
         if (this.handler.onRequestSent) {
@@ -8973,7 +9221,9 @@ var require_retry_handler = __commonJS({
         const headers = parseHeaders(rawHeaders);
         this.retryCount += 1;
         if (statusCode >= 300) {
-          if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+          if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
+            this.headersSent = true;
+            this.checkpointResponseEnd(headers, resume);
             return this.handler.onHeaders(
               statusCode,
               rawHeaders,
@@ -9022,9 +9272,21 @@ var require_retry_handler = __commonJS({
             );
             return false;
           }
+          const contentLengthError = validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount);
+          if (contentLengthError != null) {
+            this.abort(contentLengthError);
+            return false;
+          }
           const { start, size, end = size - 1 } = contentRange;
-          assert4(this.start === start, "content-range mismatch");
-          assert4(this.end == null || this.end === end, "content-range mismatch");
+          if (this.start !== start || this.end != null && this.end !== end) {
+            this.abort(
+              new RequestRetryError("Content-Range mismatch", statusCode, {
+                headers,
+                data: { count: this.retryCount }
+              })
+            );
+            return false;
+          }
           this.resume = resume;
           return true;
         }
@@ -9032,12 +9294,18 @@ var require_retry_handler = __commonJS({
           if (statusCode === 206) {
             const range2 = parseRangeHeader(headers["content-range"]);
             if (range2 == null) {
+              this.headersSent = true;
               return this.handler.onHeaders(
                 statusCode,
                 rawHeaders,
                 resume,
                 statusMessage
               );
+            }
+            const contentLengthError = validatePartialResponseContentLength(headers, range2, statusCode, this.retryCount);
+            if (contentLengthError != null) {
+              this.abort(contentLengthError);
+              return false;
             }
             const { start, size, end = size - 1 } = range2;
             assert4(
@@ -9058,6 +9326,7 @@ var require_retry_handler = __commonJS({
             "invalid content-length"
           );
           this.resume = resume;
+          this.headersSent = true;
           this.etag = headers.etag != null ? headers.etag : null;
           if (this.etag != null && this.etag.startsWith("W/")) {
             this.etag = null;
@@ -9085,7 +9354,7 @@ var require_retry_handler = __commonJS({
         return this.handler.onComplete(rawTrailers);
       }
       onError(err) {
-        if (this.aborted || isDisturbed(this.opts.body)) {
+        if (this.aborted || isDisturbed(this.opts.body) || this.headersSent && this.resume == null) {
           return this.handler.onError(err);
         }
         if (this.retryCount - this.retryCountCheckpoint > 0) {
@@ -15884,14 +16153,48 @@ var require_util6 = __commonJS({
       for (let i = 0; i < path13.length; ++i) {
         const code = path13.charCodeAt(i);
         if (code < 32 || // exclude CTLs (0-31)
-        code === 127 || // DEL
+        code > 126 || // exclude DEL and non-ascii
         code === 59) {
           throw new Error("Invalid cookie path");
         }
       }
     }
+    function isLetterOrDigit(code) {
+      return code >= 48 && code <= 57 || // 0-9
+      code >= 65 && code <= 90 || // A-Z
+      code >= 97 && code <= 122;
+    }
     function validateCookieDomain(domain) {
-      if (domain.startsWith("-") || domain.endsWith(".") || domain.endsWith("-")) {
+      if (domain === " ") {
+        return;
+      }
+      if (domain.length > 255) {
+        throw new Error("Invalid cookie domain");
+      }
+      let labelLength = 0;
+      for (let i = 0; i < domain.length; ++i) {
+        const code = domain.charCodeAt(i);
+        if (code === 46) {
+          if (labelLength === 0) {
+            throw new Error("Invalid cookie domain");
+          }
+          if (domain.charCodeAt(i - 1) === 45) {
+            throw new Error("Invalid cookie domain");
+          }
+          labelLength = 0;
+          continue;
+        }
+        if (labelLength === 0 && !isLetterOrDigit(code)) {
+          throw new Error("Invalid cookie domain");
+        }
+        if (!isLetterOrDigit(code) && code !== 45) {
+          throw new Error("Invalid cookie domain");
+        }
+        if (++labelLength > 63) {
+          throw new Error("Invalid cookie domain");
+        }
+      }
+      if (labelLength === 0 || domain.charCodeAt(domain.length - 1) === 45) {
         throw new Error("Invalid cookie domain");
       }
     }
@@ -15974,7 +16277,11 @@ var require_util6 = __commonJS({
           throw new Error("Invalid unparsed");
         }
         const [key, ...value] = part.split("=");
-        out.push(`${key.trim()}=${value.join("=")}`);
+        const trimmedKey = key.trim();
+        const joinedValue = value.join("=");
+        validateCookieName(trimmedKey);
+        validateCookieValue(joinedValue);
+        out.push(`${trimmedKey}=${joinedValue}`);
       }
       return out.join("; ");
     }
@@ -16104,18 +16411,14 @@ var require_parse = __commonJS({
       } else if (attributeNameLowercase === "httponly") {
         cookieAttributeList.httpOnly = true;
       } else if (attributeNameLowercase === "samesite") {
-        let enforcement = "Default";
         const attributeValueLowercase = attributeValue.toLowerCase();
-        if (attributeValueLowercase.includes("none")) {
-          enforcement = "None";
+        if (attributeValueLowercase === "none") {
+          cookieAttributeList.sameSite = "None";
+        } else if (attributeValueLowercase === "strict") {
+          cookieAttributeList.sameSite = "Strict";
+        } else if (attributeValueLowercase === "lax") {
+          cookieAttributeList.sameSite = "Lax";
         }
-        if (attributeValueLowercase.includes("strict")) {
-          enforcement = "Strict";
-        }
-        if (attributeValueLowercase.includes("lax")) {
-          enforcement = "Lax";
-        }
-        cookieAttributeList.sameSite = enforcement;
       } else {
         cookieAttributeList.unparsed ??= [];
         cookieAttributeList.unparsed.push(`${attributeName}=${attributeValue}`);
@@ -16937,7 +17240,7 @@ var require_connection = __commonJS({
           const secProtocol = response.headersList.get("Sec-WebSocket-Protocol");
           if (secProtocol !== null) {
             const requestProtocols = getDecodeSplit("sec-websocket-protocol", request.headersList);
-            if (!requestProtocols.includes(secProtocol)) {
+            if (requestProtocols === null || !requestProtocols.includes(secProtocol)) {
               failWebsocketConnection(ws, "Protocol was not set in the opening handshake.");
               return;
             }
@@ -17043,27 +17346,26 @@ var require_permessage_deflate = __commonJS({
     var tail = Buffer.from([0, 0, 255, 255]);
     var kBuffer = /* @__PURE__ */ Symbol("kBuffer");
     var kLength = /* @__PURE__ */ Symbol("kLength");
-    var kDefaultMaxDecompressedSize = 4 * 1024 * 1024;
     var PerMessageDeflate = class {
       /** @type {import('node:zlib').InflateRaw} */
       #inflate;
       #options = {};
-      /** @type {boolean} */
-      #aborted = false;
-      /** @type {Function|null} */
-      #currentCallback = null;
+      #maxPayloadSize = 0;
       /**
        * @param {Map<string, string>} extensions
        */
-      constructor(extensions) {
+      constructor(extensions, options) {
         this.#options.serverNoContextTakeover = extensions.has("server_no_context_takeover");
         this.#options.serverMaxWindowBits = extensions.get("server_max_window_bits");
+        this.#maxPayloadSize = options.maxPayloadSize;
       }
+      /**
+       * Decompress a compressed payload.
+       * @param {Buffer} chunk Compressed data
+       * @param {boolean} fin Final fragment flag
+       * @param {Function} callback Callback function
+       */
       decompress(chunk, fin, callback) {
-        if (this.#aborted) {
-          callback(new MessageSizeExceededError());
-          return;
-        }
         if (!this.#inflate) {
           let windowBits = Z_DEFAULT_WINDOWBITS;
           if (this.#options.serverMaxWindowBits) {
@@ -17082,20 +17384,12 @@ var require_permessage_deflate = __commonJS({
           this.#inflate[kBuffer] = [];
           this.#inflate[kLength] = 0;
           this.#inflate.on("data", (data) => {
-            if (this.#aborted) {
-              return;
-            }
             this.#inflate[kLength] += data.length;
-            if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
-              this.#aborted = true;
+            if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+              callback(new MessageSizeExceededError());
               this.#inflate.removeAllListeners();
               this.#inflate.destroy();
               this.#inflate = null;
-              if (this.#currentCallback) {
-                const cb = this.#currentCallback;
-                this.#currentCallback = null;
-                cb(new MessageSizeExceededError());
-              }
               return;
             }
             this.#inflate[kBuffer].push(data);
@@ -17105,19 +17399,17 @@ var require_permessage_deflate = __commonJS({
             callback(err);
           });
         }
-        this.#currentCallback = callback;
         this.#inflate.write(chunk);
         if (fin) {
           this.#inflate.write(tail);
         }
         this.#inflate.flush(() => {
-          if (this.#aborted || !this.#inflate) {
+          if (!this.#inflate) {
             return;
           }
           const full = Buffer.concat(this.#inflate[kBuffer], this.#inflate[kLength]);
           this.#inflate[kBuffer].length = 0;
           this.#inflate[kLength] = 0;
-          this.#currentCallback = null;
           callback(null, full);
         });
       }
@@ -17148,8 +17440,14 @@ var require_receiver = __commonJS({
     var { WebsocketFrameSend } = require_frame();
     var { closeWebSocketConnection } = require_connection();
     var { PerMessageDeflate } = require_permessage_deflate();
+    var { MessageSizeExceededError } = require_errors();
+    function failWebsocketConnectionWithCode(ws, code, reason) {
+      closeWebSocketConnection(ws, code, reason, Buffer.byteLength(reason));
+      failWebsocketConnection(ws, reason);
+    }
     var ByteParser = class extends Writable {
       #buffers = [];
+      #fragmentsBytes = 0;
       #byteOffset = 0;
       #loop = false;
       #state = parserStates.INFO;
@@ -17157,16 +17455,23 @@ var require_receiver = __commonJS({
       #fragments = [];
       /** @type {Map<string, PerMessageDeflate>} */
       #extensions;
+      /** @type {number} */
+      #maxFragments;
+      /** @type {number} */
+      #maxPayloadSize;
       /**
        * @param {import('./websocket').WebSocket} ws
        * @param {Map<string, string>|null} extensions
+       * @param {{ maxFragments?: number, maxPayloadSize?: number }} [options]
        */
-      constructor(ws, extensions) {
+      constructor(ws, extensions, options = {}) {
         super();
         this.ws = ws;
         this.#extensions = extensions == null ? /* @__PURE__ */ new Map() : extensions;
+        this.#maxFragments = options.maxFragments ?? 0;
+        this.#maxPayloadSize = options.maxPayloadSize ?? 0;
         if (this.#extensions.has("permessage-deflate")) {
-          this.#extensions.set("permessage-deflate", new PerMessageDeflate(extensions));
+          this.#extensions.set("permessage-deflate", new PerMessageDeflate(extensions, options));
         }
       }
       /**
@@ -17178,6 +17483,13 @@ var require_receiver = __commonJS({
         this.#byteOffset += chunk.length;
         this.#loop = true;
         this.run(callback);
+      }
+      #validatePayloadLength() {
+        if (this.#maxPayloadSize > 0 && !isControlFrame(this.#info.opcode) && this.#info.payloadLength + this.#fragmentsBytes > this.#maxPayloadSize) {
+          failWebsocketConnectionWithCode(this.ws, 1009, "Payload size exceeds maximum allowed size");
+          return false;
+        }
+        return true;
       }
       /**
        * Runs whenever a new chunk is received.
@@ -17238,6 +17550,9 @@ var require_receiver = __commonJS({
             if (payloadLength <= 125) {
               this.#info.payloadLength = payloadLength;
               this.#state = parserStates.READ_DATA;
+              if (!this.#validatePayloadLength()) {
+                return;
+              }
             } else if (payloadLength === 126) {
               this.#state = parserStates.PAYLOADLENGTH_16;
             } else if (payloadLength === 127) {
@@ -17258,6 +17573,9 @@ var require_receiver = __commonJS({
             const buffer3 = this.consume(2);
             this.#info.payloadLength = buffer3.readUInt16BE(0);
             this.#state = parserStates.READ_DATA;
+            if (!this.#validatePayloadLength()) {
+              return;
+            }
           } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
             if (this.#byteOffset < 8) {
               return callback();
@@ -17271,6 +17589,9 @@ var require_receiver = __commonJS({
             }
             this.#info.payloadLength = lower;
             this.#state = parserStates.READ_DATA;
+            if (!this.#validatePayloadLength()) {
+              return;
+            }
           } else if (this.#state === parserStates.READ_DATA) {
             if (this.#byteOffset < this.#info.payloadLength) {
               return callback();
@@ -17281,32 +17602,46 @@ var require_receiver = __commonJS({
               this.#state = parserStates.INFO;
             } else {
               if (!this.#info.compressed) {
-                this.#fragments.push(body2);
+                if (!this.writeFragments(body2)) {
+                  return;
+                }
+                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+                  failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message);
+                  return;
+                }
                 if (!this.#info.fragmented && this.#info.fin) {
-                  const fullMessage = Buffer.concat(this.#fragments);
-                  websocketMessageReceived(this.ws, this.#info.binaryType, fullMessage);
-                  this.#fragments.length = 0;
+                  websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments());
                 }
                 this.#state = parserStates.INFO;
               } else {
-                this.#extensions.get("permessage-deflate").decompress(body2, this.#info.fin, (error2, data) => {
-                  if (error2) {
-                    failWebsocketConnection(this.ws, error2.message);
-                    return;
-                  }
-                  this.#fragments.push(data);
-                  if (!this.#info.fin) {
-                    this.#state = parserStates.INFO;
+                this.#extensions.get("permessage-deflate").decompress(
+                  body2,
+                  this.#info.fin,
+                  (error2, data) => {
+                    if (error2) {
+                      const code = error2 instanceof MessageSizeExceededError ? 1009 : 1007;
+                      failWebsocketConnectionWithCode(this.ws, code, error2.message);
+                      return;
+                    }
+                    if (!this.writeFragments(data)) {
+                      return;
+                    }
+                    if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+                      failWebsocketConnectionWithCode(this.ws, 1009, new MessageSizeExceededError().message);
+                      return;
+                    }
+                    if (!this.#info.fin) {
+                      this.#state = parserStates.INFO;
+                      this.#loop = true;
+                      this.run(callback);
+                      return;
+                    }
+                    websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments());
                     this.#loop = true;
+                    this.#state = parserStates.INFO;
                     this.run(callback);
-                    return;
                   }
-                  websocketMessageReceived(this.ws, this.#info.binaryType, Buffer.concat(this.#fragments));
-                  this.#loop = true;
-                  this.#state = parserStates.INFO;
-                  this.#fragments.length = 0;
-                  this.run(callback);
-                });
+                );
                 this.#loop = false;
                 break;
               }
@@ -17348,6 +17683,26 @@ var require_receiver = __commonJS({
         }
         this.#byteOffset -= n;
         return buffer3;
+      }
+      writeFragments(fragment) {
+        if (this.#maxFragments > 0 && this.#fragments.length === this.#maxFragments) {
+          failWebsocketConnectionWithCode(this.ws, 1008, "Too many message fragments");
+          return false;
+        }
+        this.#fragmentsBytes += fragment.length;
+        this.#fragments.push(fragment);
+        return true;
+      }
+      consumeFragments() {
+        const fragments = this.#fragments;
+        if (fragments.length === 1) {
+          this.#fragmentsBytes = 0;
+          return fragments.shift();
+        }
+        const output = Buffer.concat(fragments, this.#fragmentsBytes);
+        this.#fragments = [];
+        this.#fragmentsBytes = 0;
+        return output;
       }
       parseCloseBody(data) {
         assert4(data.length !== 1);
@@ -17786,7 +18141,13 @@ var require_websocket = __commonJS({
        */
       #onConnectionEstablished(response, parsedExtensions) {
         this[kResponse] = response;
-        const parser = new ByteParser(this, parsedExtensions);
+        const webSocketOptions = this[kController]?.dispatcher?.webSocketOptions;
+        const maxFragments = webSocketOptions?.maxFragments;
+        const maxPayloadSize = webSocketOptions?.maxPayloadSize;
+        const parser = new ByteParser(this, parsedExtensions, {
+          maxFragments,
+          maxPayloadSize
+        });
         parser.on("drain", onParserDrain);
         parser.on("error", onParserError.bind(this));
         response.socket.ws = this;
@@ -17939,6 +18300,40 @@ var require_eventsource_stream = __commonJS({
     var CR = 13;
     var COLON = 58;
     var SPACE = 32;
+    var DATA = Buffer.from("data");
+    var EVENT = Buffer.from("event");
+    var ID = Buffer.from("id");
+    var RETRY = Buffer.from("retry");
+    function isASCIINumberBytes(buffer3, start) {
+      if (start >= buffer3.length) {
+        return false;
+      }
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] < 48 || buffer3[i] > 57) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function isValidLastEventIdBytes(buffer3, start) {
+      for (let i = start; i < buffer3.length; i++) {
+        if (buffer3[i] === 0) {
+          return false;
+        }
+      }
+      return true;
+    }
+    function isFieldName(line, length, field) {
+      if (length !== field.length) {
+        return false;
+      }
+      for (let i = 0; i < length; i++) {
+        if (line[i] !== field[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
     var EventSourceStream = class extends Transform2 {
       /**
        * @type {eventSourceSettings}
@@ -17958,10 +18353,13 @@ var require_eventsource_stream = __commonJS({
        */
       eventEndCheck = false;
       /**
-       * @type {Buffer}
+       * @type {Buffer[]}
        */
-      buffer = null;
+      chunks = [];
+      chunkIndex = 0;
       pos = 0;
+      lineChunkIndex = 0;
+      linePos = 0;
       event = {
         data: void 0,
         event: void 0,
@@ -17992,63 +18390,30 @@ var require_eventsource_stream = __commonJS({
           callback();
           return;
         }
-        if (this.buffer) {
-          this.buffer = Buffer.concat([this.buffer, chunk]);
-        } else {
-          this.buffer = chunk;
-        }
+        this.chunks.push(chunk);
         if (this.checkBOM) {
-          switch (this.buffer.length) {
-            case 1:
-              if (this.buffer[0] === BOM[0]) {
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              callback();
-              return;
-            case 2:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1]) {
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              break;
-            case 3:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1] && this.buffer[2] === BOM[2]) {
-                this.buffer = Buffer.alloc(0);
-                this.checkBOM = false;
-                callback();
-                return;
-              }
-              this.checkBOM = false;
-              break;
-            default:
-              if (this.buffer[0] === BOM[0] && this.buffer[1] === BOM[1] && this.buffer[2] === BOM[2]) {
-                this.buffer = this.buffer.subarray(3);
-              }
-              this.checkBOM = false;
-              break;
+          if (this.handleBOM()) {
+            callback();
+            return;
           }
         }
-        while (this.pos < this.buffer.length) {
+        while (this.hasCurrentByte()) {
+          const byte = this.currentByte();
           if (this.eventEndCheck) {
             if (this.crlfCheck) {
-              if (this.buffer[this.pos] === LF) {
-                this.buffer = this.buffer.subarray(this.pos + 1);
-                this.pos = 0;
+              if (byte === LF) {
                 this.crlfCheck = false;
+                this.consumeCurrentByte();
                 continue;
               }
               this.crlfCheck = false;
             }
-            if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
-              if (this.buffer[this.pos] === CR) {
+            if (byte === LF || byte === CR) {
+              if (byte === CR) {
                 this.crlfCheck = true;
               }
-              this.buffer = this.buffer.subarray(this.pos + 1);
-              this.pos = 0;
-              if (this.event.data !== void 0 || this.event.event || this.event.id || this.event.retry) {
+              this.consumeCurrentByte();
+              if (this.hasPendingEvent()) {
                 this.processEvent(this.event);
               }
               this.clearEvent();
@@ -18057,17 +18422,16 @@ var require_eventsource_stream = __commonJS({
             this.eventEndCheck = false;
             continue;
           }
-          if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
-            if (this.buffer[this.pos] === CR) {
+          if (byte === LF || byte === CR) {
+            if (byte === CR) {
               this.crlfCheck = true;
             }
-            this.parseLine(this.buffer.subarray(0, this.pos), this.event);
-            this.buffer = this.buffer.subarray(this.pos + 1);
-            this.pos = 0;
+            this.parseLine(this.readLine(), this.event);
+            this.consumeCurrentByte();
             this.eventEndCheck = true;
             continue;
           }
-          this.pos++;
+          this.advanceCursor();
         }
         callback();
       }
@@ -18083,43 +18447,42 @@ var require_eventsource_stream = __commonJS({
         if (colonPosition === 0) {
           return;
         }
-        let field = "";
-        let value = "";
+        let fieldLength = line.length;
+        let valueStart = line.length;
         if (colonPosition !== -1) {
-          field = line.subarray(0, colonPosition).toString("utf8");
-          let valueStart = colonPosition + 1;
+          fieldLength = colonPosition;
+          valueStart = colonPosition + 1;
           if (line[valueStart] === SPACE) {
             ++valueStart;
           }
-          value = line.subarray(valueStart).toString("utf8");
-        } else {
-          field = line.toString("utf8");
-          value = "";
         }
-        switch (field) {
-          case "data":
-            if (event[field] === void 0) {
-              event[field] = value;
-            } else {
-              event[field] += `
+        if (isFieldName(line, fieldLength, DATA)) {
+          const value = line.toString("utf8", valueStart);
+          if (event.data === void 0) {
+            event.data = value;
+          } else {
+            event.data += `
 ${value}`;
-            }
-            break;
-          case "retry":
-            if (isASCIINumber(value)) {
-              event[field] = value;
-            }
-            break;
-          case "id":
-            if (isValidLastEventId(value)) {
-              event[field] = value;
-            }
-            break;
-          case "event":
-            if (value.length > 0) {
-              event[field] = value;
-            }
-            break;
+          }
+          return;
+        }
+        if (isFieldName(line, fieldLength, RETRY)) {
+          if (isASCIINumberBytes(line, valueStart)) {
+            event.retry = line.toString("utf8", valueStart);
+          }
+          return;
+        }
+        if (isFieldName(line, fieldLength, ID)) {
+          if (isValidLastEventIdBytes(line, valueStart)) {
+            event.id = line.toString("utf8", valueStart);
+          }
+          return;
+        }
+        if (isFieldName(line, fieldLength, EVENT)) {
+          const value = line.toString("utf8", valueStart);
+          if (value.length > 0) {
+            event.event = value;
+          }
         }
       }
       /**
@@ -18144,12 +18507,120 @@ ${value}`;
         }
       }
       clearEvent() {
-        this.event = {
-          data: void 0,
-          event: void 0,
-          id: void 0,
-          retry: void 0
-        };
+        this.event.data = void 0;
+        this.event.event = void 0;
+        this.event.id = void 0;
+        this.event.retry = void 0;
+      }
+      hasPendingEvent() {
+        return this.event.data !== void 0 || this.event.event !== void 0 || this.event.id !== void 0 || this.event.retry !== void 0;
+      }
+      hasCurrentByte() {
+        return this.chunkIndex < this.chunks.length && this.pos < this.chunks[this.chunkIndex].length;
+      }
+      currentByte() {
+        return this.chunks[this.chunkIndex][this.pos];
+      }
+      consumeCurrentByte() {
+        this.advanceCursor();
+        this.syncLineStartToCursor();
+      }
+      advanceCursor() {
+        this.pos++;
+        while (this.chunkIndex < this.chunks.length && this.pos >= this.chunks[this.chunkIndex].length) {
+          this.chunkIndex++;
+          this.pos = 0;
+        }
+      }
+      syncLineStartToCursor() {
+        this.lineChunkIndex = this.chunkIndex;
+        this.linePos = this.pos;
+        this.dropConsumedChunks();
+      }
+      dropConsumedChunks() {
+        while (this.lineChunkIndex > 0) {
+          this.chunks.shift();
+          this.lineChunkIndex--;
+          this.chunkIndex--;
+        }
+        if (this.chunkIndex === this.chunks.length) {
+          this.chunks.length = 0;
+          this.chunkIndex = 0;
+          this.pos = 0;
+          this.lineChunkIndex = 0;
+          this.linePos = 0;
+        }
+      }
+      readLine() {
+        if (this.lineChunkIndex === this.chunkIndex) {
+          return this.chunks[this.chunkIndex].subarray(this.linePos, this.pos);
+        }
+        const chunks = [];
+        let length = 0;
+        for (let i = this.lineChunkIndex; i <= this.chunkIndex; i++) {
+          const chunk = this.chunks[i];
+          const start = i === this.lineChunkIndex ? this.linePos : 0;
+          const end = i === this.chunkIndex ? this.pos : chunk.length;
+          const slice = chunk.subarray(start, end);
+          length += slice.length;
+          chunks.push(slice);
+        }
+        return Buffer.concat(chunks, length);
+      }
+      peekBufferedByte(offset) {
+        let chunkIndex = this.lineChunkIndex;
+        let pos = this.linePos;
+        while (chunkIndex < this.chunks.length) {
+          const chunk = this.chunks[chunkIndex];
+          const remaining = chunk.length - pos;
+          if (offset < remaining) {
+            return chunk[pos + offset];
+          }
+          offset -= remaining;
+          chunkIndex++;
+          pos = 0;
+        }
+      }
+      discardLeadingBytes(count) {
+        while (count > 0 && this.lineChunkIndex < this.chunks.length) {
+          const chunk = this.chunks[this.lineChunkIndex];
+          const remaining = chunk.length - this.linePos;
+          if (count < remaining) {
+            this.linePos += count;
+            count = 0;
+          } else {
+            count -= remaining;
+            this.lineChunkIndex++;
+            this.linePos = 0;
+          }
+        }
+        this.chunkIndex = this.lineChunkIndex;
+        this.pos = this.linePos;
+        this.dropConsumedChunks();
+      }
+      handleBOM() {
+        const first = this.peekBufferedByte(0);
+        const second = this.peekBufferedByte(1);
+        const third = this.peekBufferedByte(2);
+        if (second === void 0) {
+          if (first === BOM[0]) {
+            return true;
+          }
+          this.checkBOM = false;
+          return true;
+        }
+        if (third === void 0) {
+          if (first === BOM[0] && second === BOM[1]) {
+            return true;
+          }
+          this.checkBOM = false;
+          return false;
+        }
+        if (first === BOM[0] && second === BOM[1] && third === BOM[2]) {
+          this.discardLeadingBytes(3);
+        }
+        this.checkBOM = false;
+        return !this.hasCurrentByte();
       }
     };
     module.exports = {
@@ -18684,6 +19155,10 @@ var require_brace_expansion = __commonJS({
     var escClose = "\0CLOSE" + Math.random() + "\0";
     var escComma = "\0COMMA" + Math.random() + "\0";
     var escPeriod = "\0PERIOD" + Math.random() + "\0";
+    var EXPANSION_MAX = 1e5;
+    var EXPANSION_MAX_LENGTH = 4e6;
+    var EXPANSION_MAX_DEPTH = 1e3;
+    var EXPANSION_MAX_REWRITES = 1e3;
     function numeric(str) {
       return parseInt(str, 10) == str ? parseInt(str, 10) : str.charCodeAt(0);
     }
@@ -18693,33 +19168,49 @@ var require_brace_expansion = __commonJS({
     function unescapeBraces(str) {
       return str.split(escSlash).join("\\").split(escOpen).join("{").split(escClose).join("}").split(escComma).join(",").split(escPeriod).join(".");
     }
-    function parseCommaParts(str) {
-      if (!str)
-        return [""];
-      var parts = [];
-      var m = balanced("{", "}", str);
-      if (!m)
-        return str.split(",");
-      var pre = m.pre;
-      var body2 = m.body;
-      var post = m.post;
-      var p = pre.split(",");
-      p[p.length - 1] += "{" + body2 + "}";
-      var postParts = parseCommaParts(post);
-      if (post.length) {
-        p[p.length - 1] += postParts.shift();
-        p.push.apply(p, postParts);
+    function pushAll(target, items) {
+      for (var i = 0; i < items.length; i++) {
+        target.push(items[i]);
       }
-      parts.push.apply(parts, p);
-      return parts;
     }
-    function expandTop(str) {
+    function parseCommaParts(str) {
+      var parts = [];
+      var carry = "";
+      for (; ; ) {
+        var m = balanced("{", "}", str);
+        if (!m) {
+          var tail = str.split(",");
+          tail[0] = carry + tail[0];
+          pushAll(parts, tail);
+          return parts;
+        }
+        var pre = m.pre;
+        var body2 = m.body;
+        var post = m.post;
+        var p = pre.split(",");
+        p[0] = carry + p[0];
+        p[p.length - 1] += "{" + body2 + "}";
+        if (!post.length) {
+          pushAll(parts, p);
+          return parts;
+        }
+        carry = p.pop();
+        pushAll(parts, p);
+        str = post;
+      }
+    }
+    function expandTop(str, options) {
       if (!str)
         return [];
+      options = options || {};
+      var max = options.max == null ? EXPANSION_MAX : options.max;
+      var maxLength = options.maxLength == null ? EXPANSION_MAX_LENGTH : options.maxLength;
+      var maxDepth = options.maxDepth == null ? EXPANSION_MAX_DEPTH : options.maxDepth;
+      var maxRewrites = options.maxRewrites == null ? EXPANSION_MAX_REWRITES : options.maxRewrites;
       if (str.substr(0, 2) === "{}") {
         str = "\\{\\}" + str.substr(2);
       }
-      return expand(escapeBraces(str), true).map(unescapeBraces);
+      return expand(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, true).map(unescapeBraces);
     }
     function embrace(str) {
       return "{" + str + "}";
@@ -18733,86 +19224,180 @@ var require_brace_expansion = __commonJS({
     function gte(i, y) {
       return i >= y;
     }
-    function expand(str, isTop) {
-      var expansions = [];
-      var m = balanced("{", "}", str);
-      if (!m || /\$$/.test(m.pre)) return [str];
-      var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
-      var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
-      var isSequence = isNumericSequence || isAlphaSequence;
-      var isOptions = m.body.indexOf(",") >= 0;
-      if (!isSequence && !isOptions) {
-        if (m.post.match(/,(?!,).*\}/)) {
-          str = m.pre + "{" + m.body + escClose + m.post;
-          return expand(str);
+    function combine(acc, base, pre, values, max, maxLength, dropEmpties, outBase) {
+      var out = [];
+      var length = 0;
+      for (var a = 0; a < acc.length; a++) {
+        for (var v = 0; v < values.length; v++) {
+          if (out.length >= max) return out;
+          var expansion = acc[a] + pre + values[v];
+          if (dropEmpties && expansion.length === base[a]) continue;
+          if (length + expansion.length > maxLength) return out;
+          out.push(expansion);
+          outBase.push(base[a]);
+          length += expansion.length;
         }
-        return [str];
       }
-      var n;
-      if (isSequence) {
-        n = m.body.split(/\.\./);
-      } else {
-        n = parseCommaParts(m.body);
-        if (n.length === 1) {
-          n = expand(n[0], false).map(embrace);
-          if (n.length === 1) {
-            var post = m.post.length ? expand(m.post, false) : [""];
-            return post.map(function(p) {
-              return m.pre + n[0] + p;
-            });
+      return out;
+    }
+    function expandSequence(body2, isAlphaSequence, max, maxLength) {
+      var n = body2.split(/\.\./);
+      var N = [];
+      if (n[0] === void 0 || n[1] === void 0) {
+        return N;
+      }
+      var x = numeric(n[0]);
+      var y = numeric(n[1]);
+      var width = Math.max(n[0].length, n[1].length);
+      var incr = n.length === 3 && n[2] !== void 0 ? Math.max(Math.abs(numeric(n[2])), 1) : 1;
+      var test2 = lte;
+      var reverse = y < x;
+      if (reverse) {
+        incr *= -1;
+        test2 = gte;
+      }
+      var pad = n.some(isPadded);
+      var length = 0;
+      for (var i = x; test2(i, y) && N.length < max; i += incr) {
+        var c;
+        if (isAlphaSequence) {
+          c = String.fromCharCode(i);
+          if (c === "\\") {
+            c = "";
           }
-        }
-      }
-      var pre = m.pre;
-      var post = m.post.length ? expand(m.post, false) : [""];
-      var N;
-      if (isSequence) {
-        var x = numeric(n[0]);
-        var y = numeric(n[1]);
-        var width = Math.max(n[0].length, n[1].length);
-        var incr = n.length == 3 ? Math.abs(numeric(n[2])) : 1;
-        var test2 = lte;
-        var reverse = y < x;
-        if (reverse) {
-          incr *= -1;
-          test2 = gte;
-        }
-        var pad = n.some(isPadded);
-        N = [];
-        for (var i = x; test2(i, y); i += incr) {
-          var c;
-          if (isAlphaSequence) {
-            c = String.fromCharCode(i);
-            if (c === "\\")
-              c = "";
-          } else {
-            c = String(i);
-            if (pad) {
-              var need = width - c.length;
-              if (need > 0) {
-                var z = new Array(need + 1).join("0");
-                if (i < 0)
-                  c = "-" + z + c.slice(1);
-                else
-                  c = z + c;
+        } else {
+          c = String(i);
+          if (pad) {
+            var need = width - c.length;
+            if (need > 0) {
+              var z = new Array(need + 1).join("0");
+              if (i < 0) {
+                c = "-" + z + c.slice(1);
+              } else {
+                c = z + c;
               }
             }
           }
-          N.push(c);
         }
-      } else {
-        N = concatMap(n, function(el) {
-          return expand(el, false);
-        });
+        if (length + c.length > maxLength) break;
+        N.push(c);
+        length += c.length;
       }
-      for (var j = 0; j < N.length; j++) {
-        for (var k = 0; k < post.length; k++) {
-          var expansion = pre + N[j] + post[k];
-          if (!isTop || isSequence || expansion)
-            expansions.push(expansion);
+      return N;
+    }
+    function expand(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
+      if (depth > maxDepth) {
+        return [str];
+      }
+      var acc = [""];
+      var accBase = [0];
+      var rewrites = 0;
+      var dropEmpties = false;
+      var firstGroup = true;
+      var nextBase;
+      for (; ; ) {
+        var m = balanced("{", "}", str);
+        if (!m) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
         }
+        var pre = m.pre;
+        if (/\$$/.test(pre)) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
+        }
+        var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
+        var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
+        var isSequence = isNumericSequence || isAlphaSequence;
+        var isOptions = m.body.indexOf(",") >= 0;
+        if (!isSequence && !isOptions) {
+          if (rewrites < maxRewrites && m.post.match(/,(?!,).*\}/)) {
+            rewrites++;
+            str = m.pre + "{" + m.body + escClose + m.post;
+            isTop = true;
+            firstGroup = true;
+            dropEmpties = false;
+            accBase = [];
+            for (var b = 0; b < acc.length; b++) {
+              accBase.push(acc[b].length);
+            }
+            continue;
+          }
+          return combine(
+            acc,
+            accBase,
+            pre + "{" + m.body + "}" + m.post,
+            [""],
+            max,
+            maxLength,
+            dropEmpties,
+            []
+          );
+        }
+        if (firstGroup) {
+          dropEmpties = isTop && !isSequence;
+          firstGroup = false;
+        }
+        var values;
+        if (isSequence) {
+          values = expandSequence(m.body, isAlphaSequence, max, maxLength);
+        } else {
+          var n = parseCommaParts(m.body);
+          if (n.length === 1 && n[0] !== void 0) {
+            n = expand(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, false).map(embrace);
+            if (n.length === 1) {
+              nextBase = [];
+              acc = combine(
+                acc,
+                accBase,
+                pre + n[0],
+                [""],
+                max,
+                maxLength,
+                dropEmpties && !m.post.length,
+                nextBase
+              );
+              accBase = nextBase;
+              if (!m.post.length) break;
+              str = m.post;
+              continue;
+            }
+          }
+          var dropsEmpties = dropEmpties && !m.post.length && !pre;
+          for (var d = 0; dropsEmpties && d < acc.length; d++) {
+            if (acc[d].length !== accBase[d]) {
+              dropsEmpties = false;
+            }
+          }
+          values = [];
+          var valuesLength = 0;
+          outer: for (var j = 0; j < n.length; j++) {
+            var expanded = expand(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, false);
+            for (var k = 0; k < expanded.length; k++) {
+              var v = expanded[k];
+              if (dropsEmpties && !v) continue;
+              if (values.length >= max || valuesLength + v.length > maxLength) {
+                break outer;
+              }
+              values.push(v);
+              valuesLength += v.length;
+            }
+          }
+        }
+        nextBase = [];
+        acc = combine(
+          acc,
+          accBase,
+          pre,
+          values,
+          max,
+          maxLength,
+          dropEmpties && !m.post.length,
+          nextBase
+        );
+        accBase = nextBase;
+        if (!m.post.length) break;
+        str = m.post;
       }
-      return expansions;
+      return acc;
     }
   }
 });

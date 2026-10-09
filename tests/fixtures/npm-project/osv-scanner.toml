@@ -1,0 +1,71 @@
+[[IgnoredVulns]]
+id = "GHSA-23hp-3jrh-7fpw"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-34x7-hfp2-rc4v"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-3jfq-g458-7qm9"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-5955-9wpr-37jh"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-83g3-92jg-28cx"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-8qq5-rm4j-mr97"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-8x88-c5mf-7j5w"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-9ppj-qmqm-q256"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-9r2w-394v-53qc"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-f5x3-32g6-xq36"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-gvwx-54wh-qm9j"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-qffp-2rhf-9h96"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-qq89-hq3f-393p"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-r292-9mhp-454m"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-r628-mhmh-qjhw"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-r6q2-hw4h-h46w"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-vmf3-w455-68vh"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
+
+[[IgnoredVulns]]
+id = "GHSA-w8wr-v893-vjvp"
+reason = "Vulnerability in test fixture (tar@6.1.0 in tests/fixtures/npm-project), not used in production"
