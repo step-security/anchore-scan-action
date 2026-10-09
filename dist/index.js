@@ -77542,6 +77542,49 @@ function downloadToolAttempt(url3, dest, auth, headers) {
     }
   });
 }
+function extractTar2(file_1, dest_1) {
+  return __awaiter20(this, arguments, void 0, function* (file, dest, flags = "xz") {
+    if (!file) {
+      throw new Error("parameter 'file' is required");
+    }
+    dest = yield _createExtractFolder(dest);
+    debug("Checking tar --version");
+    let versionOutput = "";
+    yield exec("tar --version", [], {
+      ignoreReturnCode: true,
+      silent: true,
+      listeners: {
+        stdout: (data) => versionOutput += data.toString(),
+        stderr: (data) => versionOutput += data.toString()
+      }
+    });
+    debug(versionOutput.trim());
+    const isGnuTar = versionOutput.toUpperCase().includes("GNU TAR");
+    let args;
+    if (flags instanceof Array) {
+      args = flags;
+    } else {
+      args = [flags];
+    }
+    if (isDebug() && !flags.includes("v")) {
+      args.push("-v");
+    }
+    let destArg = dest;
+    let fileArg = file;
+    if (IS_WINDOWS9 && isGnuTar) {
+      args.push("--force-local");
+      destArg = dest.replace(/\\/g, "/");
+      fileArg = file.replace(/\\/g, "/");
+    }
+    if (isGnuTar) {
+      args.push("--warning=no-unknown-keyword");
+      args.push("--overwrite");
+    }
+    args.push("-C", destArg, "-f", fileArg);
+    yield exec(`tar`, args);
+    return dest;
+  });
+}
 function extractZip(file, dest) {
   return __awaiter20(this, void 0, void 0, function* () {
     if (!file) {
@@ -77820,6 +77863,70 @@ async function downloadGrypeWindowsWorkaround(version3) {
   debug(`Grype path is ${binaryPath}`);
   return binaryPath;
 }
+async function verifyInstalledBinary(version3, installedBinaryPath) {
+  const versionNoV = version3.replace(/^v/, "");
+  const platformMap = { linux: "linux", darwin: "darwin" };
+  const archMap = { x64: "amd64", arm64: "arm64" };
+  const platform2 = platformMap[process4.platform];
+  const arch3 = archMap[process4.arch];
+  if (!platform2 || !arch3) {
+    warning(
+      `Checksum verification not supported for platform/arch: ${process4.platform}/${process4.arch}`
+    );
+    return;
+  }
+  const archiveFilename = `grype_${versionNoV}_${platform2}_${arch3}.tar.gz`;
+  const baseUrl = `https://github.com/anchore/grype/releases/download/${version3}`;
+  const checksumsUrl = `${baseUrl}/grype_${versionNoV}_checksums.txt`;
+  const archiveUrl = `${baseUrl}/${archiveFilename}`;
+  info(`Downloading grype checksums from ${checksumsUrl}`);
+  let checksumsPath;
+  try {
+    checksumsPath = await downloadTool(checksumsUrl);
+  } catch (e) {
+    warning(
+      `Unable to download checksums for verification: ${describeError(e)} \u2014 skipping verification`
+    );
+    return;
+  }
+  const expectedHash = parseChecksums(
+    fs9.readFileSync(checksumsPath, "utf8"),
+    archiveFilename
+  );
+  if (!expectedHash) {
+    warning(
+      `Could not find checksum for ${archiveFilename} in checksums file \u2014 skipping verification`
+    );
+    return;
+  }
+  info(`Downloading grype archive for verification from ${archiveUrl}`);
+  let archivePath;
+  try {
+    archivePath = await downloadTool(archiveUrl);
+  } catch (e) {
+    warning(
+      `Unable to download archive for verification: ${describeError(e)} \u2014 skipping verification`
+    );
+    return;
+  }
+  const actualArchiveHash = crypto5.createHash("sha256").update(fs9.readFileSync(archivePath)).digest("hex");
+  if (actualArchiveHash !== expectedHash) {
+    throw new Error(
+      `Checksum mismatch for grype ${version3}: expected ${expectedHash}, got ${actualArchiveHash}`
+    );
+  }
+  const extractDir = fs9.mkdtempSync(path12.join(os9.tmpdir(), "grype-verify-"));
+  await extractTar2(archivePath, extractDir);
+  const extractedBinaryPath = path12.join(extractDir, "grype");
+  const installedHash = crypto5.createHash("sha256").update(fs9.readFileSync(installedBinaryPath)).digest("hex");
+  const extractedHash = crypto5.createHash("sha256").update(fs9.readFileSync(extractedBinaryPath)).digest("hex");
+  if (installedHash !== extractedHash) {
+    throw new Error(
+      `Installed grype binary does not match the verified release archive for ${version3}`
+    );
+  }
+  info(`Checksum verified for grype ${version3}`);
+}
 function isReleaseTag(version3) {
   return /^v\d+\.\d+\.\d+([-+][\w.+-]+)?$/.test(version3);
 }
@@ -77873,7 +77980,11 @@ async function downloadGrype(version3) {
     error(stdout);
     throw new Error("error installing grype");
   }
-  return path12.join(installToDir, isWindows() ? "grype.exe" : "grype");
+  const installedBinaryPath = path12.join(installToDir, "grype");
+  if (isTag) {
+    await verifyInstalledBinary(version3, installedBinaryPath);
+  }
+  return installedBinaryPath;
 }
 async function installGrype(version3) {
   info(`Installing grype ${version3}`);

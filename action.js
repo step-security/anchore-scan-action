@@ -85,6 +85,93 @@ async function downloadGrypeWindowsWorkaround(version) {
   return binaryPath;
 }
 
+// independently verifies an installed grype binary against the published release
+// checksums by downloading the release tarball, verifying its hash, extracting
+// the binary, and comparing it with the installed binary.
+async function verifyInstalledBinary(version, installedBinaryPath) {
+  const versionNoV = version.replace(/^v/, "");
+  const platformMap = { linux: "linux", darwin: "darwin" };
+  const archMap = { x64: "amd64", arm64: "arm64" };
+  const platform = platformMap[process.platform];
+  const arch = archMap[process.arch];
+
+  if (!platform || !arch) {
+    core.warning(
+      `Checksum verification not supported for platform/arch: ${process.platform}/${process.arch}`,
+    );
+    return;
+  }
+
+  const archiveFilename = `grype_${versionNoV}_${platform}_${arch}.tar.gz`;
+  const baseUrl = `https://github.com/anchore/grype/releases/download/${version}`;
+  const checksumsUrl = `${baseUrl}/grype_${versionNoV}_checksums.txt`;
+  const archiveUrl = `${baseUrl}/${archiveFilename}`;
+
+  core.info(`Downloading grype checksums from ${checksumsUrl}`);
+  let checksumsPath;
+  try {
+    checksumsPath = await tools.downloadTool(checksumsUrl);
+  } catch (e) {
+    core.warning(
+      `Unable to download checksums for verification: ${describeError(e)} — skipping verification`,
+    );
+    return;
+  }
+
+  const expectedHash = parseChecksums(
+    fs.readFileSync(checksumsPath, "utf8"),
+    archiveFilename,
+  );
+  if (!expectedHash) {
+    core.warning(
+      `Could not find checksum for ${archiveFilename} in checksums file — skipping verification`,
+    );
+    return;
+  }
+
+  core.info(`Downloading grype archive for verification from ${archiveUrl}`);
+  let archivePath;
+  try {
+    archivePath = await tools.downloadTool(archiveUrl);
+  } catch (e) {
+    core.warning(
+      `Unable to download archive for verification: ${describeError(e)} — skipping verification`,
+    );
+    return;
+  }
+
+  const actualArchiveHash = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(archivePath))
+    .digest("hex");
+  if (actualArchiveHash !== expectedHash) {
+    throw new Error(
+      `Checksum mismatch for grype ${version}: expected ${expectedHash}, got ${actualArchiveHash}`,
+    );
+  }
+
+  const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), "grype-verify-"));
+  await tools.extractTar(archivePath, extractDir);
+  const extractedBinaryPath = path.join(extractDir, "grype");
+
+  const installedHash = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(installedBinaryPath))
+    .digest("hex");
+  const extractedHash = crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(extractedBinaryPath))
+    .digest("hex");
+
+  if (installedHash !== extractedHash) {
+    throw new Error(
+      `Installed grype binary does not match the verified release archive for ${version}`,
+    );
+  }
+
+  core.info(`Checksum verified for grype ${version}`);
+}
+
 // reports whether the given version is a grype release tag. the version is
 // interpolated into the URL of a script that gets executed, so this has to
 // match the whole string: a value such as "v1/../../../someone/else/main"
@@ -169,7 +256,12 @@ async function downloadGrype(version) {
     core.error(stdout);
     throw new Error("error installing grype");
   }
-  return path.join(installToDir, isWindows() ? "grype.exe" : "grype");
+
+  const installedBinaryPath = path.join(installToDir, "grype");
+  if (isTag) {
+    await verifyInstalledBinary(version, installedBinaryPath);
+  }
+  return installedBinaryPath;
 }
 
 async function installGrype(version) {
