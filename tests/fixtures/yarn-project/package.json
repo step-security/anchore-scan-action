@@ -6,7 +6,7 @@
   "author": "test@test",
   "license": "MIT",
   "dependencies": {
-    "react": "16",
+    "react": "19",
     "trim": "0.0.2"
   }
 }
