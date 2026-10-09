@@ -4012,11 +4012,11 @@ var require_util2 = __commonJS({
     var { isUint8Array } = __require("node:util/types");
     var { webidl } = require_webidl();
     var supportedHashes = [];
-    var crypto6;
+    var crypto7;
     try {
-      crypto6 = __require("node:crypto");
+      crypto7 = __require("node:crypto");
       const possibleRelevantHashes = ["sha256", "sha384", "sha512"];
-      supportedHashes = crypto6.getHashes().filter((hash) => possibleRelevantHashes.includes(hash));
+      supportedHashes = crypto7.getHashes().filter((hash) => possibleRelevantHashes.includes(hash));
     } catch {
     }
     function responseURL(response) {
@@ -4289,7 +4289,7 @@ var require_util2 = __commonJS({
       }
     }
     function bytesMatch(bytes, metadataList) {
-      if (crypto6 === void 0) {
+      if (crypto7 === void 0) {
         return true;
       }
       const parsedMetadata = parseMetadata(metadataList);
@@ -4304,7 +4304,7 @@ var require_util2 = __commonJS({
       for (const item of metadata2) {
         const algorithm = item.algo;
         const expectedValue = item.hash;
-        let actualValue = crypto6.createHash(algorithm).update(bytes).digest("base64");
+        let actualValue = crypto7.createHash(algorithm).update(bytes).digest("base64");
         if (actualValue[actualValue.length - 1] === "=") {
           if (actualValue[actualValue.length - 2] === "=") {
             actualValue = actualValue.slice(0, -2);
@@ -5368,8 +5368,8 @@ var require_body = __commonJS({
     var { multipartFormDataParser } = require_formdata_parser();
     var random;
     try {
-      const crypto6 = __require("node:crypto");
-      random = (max) => crypto6.randomInt(0, max);
+      const crypto7 = __require("node:crypto");
+      random = (max) => crypto7.randomInt(0, max);
     } catch {
       random = (max) => Math.floor(Math.random(max));
     }
@@ -16777,13 +16777,13 @@ var require_frame = __commonJS({
     "use strict";
     var { maxUnsigned16Bit } = require_constants5();
     var BUFFER_SIZE = 16386;
-    var crypto6;
+    var crypto7;
     var buffer3 = null;
     var bufIdx = BUFFER_SIZE;
     try {
-      crypto6 = __require("node:crypto");
+      crypto7 = __require("node:crypto");
     } catch {
-      crypto6 = {
+      crypto7 = {
         // not full compatibility, but minimum.
         randomFillSync: function randomFillSync(buffer4, _offset, _size) {
           for (let i = 0; i < buffer4.length; ++i) {
@@ -16796,7 +16796,7 @@ var require_frame = __commonJS({
     function generateMask() {
       if (bufIdx === BUFFER_SIZE) {
         bufIdx = 0;
-        crypto6.randomFillSync(buffer3 ??= Buffer.allocUnsafe(BUFFER_SIZE), 0, BUFFER_SIZE);
+        crypto7.randomFillSync(buffer3 ??= Buffer.allocUnsafe(BUFFER_SIZE), 0, BUFFER_SIZE);
       }
       return [buffer3[bufIdx++], buffer3[bufIdx++], buffer3[bufIdx++], buffer3[bufIdx++]];
     }
@@ -16868,9 +16868,9 @@ var require_connection = __commonJS({
     var { Headers: Headers2, getHeadersList } = require_headers();
     var { getDecodeSplit } = require_util2();
     var { WebsocketFrameSend } = require_frame();
-    var crypto6;
+    var crypto7;
     try {
-      crypto6 = __require("node:crypto");
+      crypto7 = __require("node:crypto");
     } catch {
     }
     function establishWebSocketConnection(url3, protocols, client, ws, onEstablish, options) {
@@ -16890,7 +16890,7 @@ var require_connection = __commonJS({
         const headersList = getHeadersList(new Headers2(options.headers));
         request.headersList = headersList;
       }
-      const keyValue = crypto6.randomBytes(16).toString("base64");
+      const keyValue = crypto7.randomBytes(16).toString("base64");
       request.headersList.append("sec-websocket-key", keyValue);
       request.headersList.append("sec-websocket-version", "13");
       for (const protocol of protocols) {
@@ -16920,7 +16920,7 @@ var require_connection = __commonJS({
             return;
           }
           const secWSAccept = response.headersList.get("Sec-WebSocket-Accept");
-          const digest = crypto6.createHash("sha1").update(keyValue + uid).digest("base64");
+          const digest = crypto7.createHash("sha1").update(keyValue + uid).digest("base64");
           if (secWSAccept !== digest) {
             failWebsocketConnection(ws, "Incorrect hash received in Sec-WebSocket-Accept header.");
             return;
@@ -38891,7 +38891,7 @@ var require_form_data = __commonJS({
     var parseUrl2 = __require("url").parse;
     var fs11 = __require("fs");
     var Stream = __require("stream").Stream;
-    var crypto6 = __require("crypto");
+    var crypto7 = __require("crypto");
     var mime = require_mime_types();
     var asynckit = require_asynckit();
     var setToStringTag = require_es_set_tostringtag();
@@ -39100,7 +39100,7 @@ var require_form_data = __commonJS({
       return Buffer.concat([dataBuffer, Buffer.from(this._lastBoundary())]);
     };
     FormData3.prototype._generateBoundary = function() {
-      this._boundary = "--------------------------" + crypto6.randomBytes(12).toString("hex");
+      this._boundary = "--------------------------" + crypto7.randomBytes(12).toString("hex");
     };
     FormData3.prototype.getLengthSync = function() {
       var knownLength = this._overheadLength + this._valueLength;
@@ -77747,6 +77747,7 @@ function _getGlobal(key, defaultValue) {
 }
 
 // action.js
+import crypto5 from "node:crypto";
 import fs9 from "node:fs";
 import os9 from "node:os";
 import path12 from "node:path";
@@ -77759,9 +77760,40 @@ var GRYPE_VERSION = "v0.118.0";
 // action.js
 var grypeVersion = getInput("grype-version") || GRYPE_VERSION;
 var grypeExecutableName = isWindows() ? "grype.exe" : "grype";
+function parseChecksums(content, filename) {
+  for (const line of content.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 2 && parts[1] === filename) {
+      return parts[0];
+    }
+  }
+  return null;
+}
 async function downloadGrypeWindowsWorkaround(version3) {
   const versionNoV = version3.replace(/^v/, "");
-  const url3 = `https://github.com/anchore/grype/releases/download/${version3}/grype_${versionNoV}_windows_amd64.zip`;
+  const archiveFilename = `grype_${versionNoV}_windows_amd64.zip`;
+  const baseUrl = `https://github.com/anchore/grype/releases/download/${version3}`;
+  const url3 = `${baseUrl}/${archiveFilename}`;
+  const checksumsUrl = `${baseUrl}/grype_${versionNoV}_checksums.txt`;
+  info(`Downloading grype checksums from ${checksumsUrl}`);
+  let checksumsPath;
+  try {
+    checksumsPath = await downloadTool(checksumsUrl);
+  } catch (e) {
+    throw new Error(
+      `Unable to download grype checksums from ${checksumsUrl}: ${describeError(e)}`,
+      { cause: e }
+    );
+  }
+  const expectedHash = parseChecksums(
+    fs9.readFileSync(checksumsPath, "utf8"),
+    archiveFilename
+  );
+  if (!expectedHash) {
+    warning(
+      `Could not find checksum for ${archiveFilename} in checksums file \u2014 skipping verification`
+    );
+  }
   info(`Downloading grype from ${url3}`);
   let zipPath;
   try {
@@ -77771,6 +77803,15 @@ async function downloadGrypeWindowsWorkaround(version3) {
       `Unable to download grype from ${url3}: ${describeError(e)}. If this is not a transient network failure, check that '${version3}' is a released version of grype: https://github.com/anchore/grype/releases`,
       { cause: e }
     );
+  }
+  if (expectedHash) {
+    const actualHash = crypto5.createHash("sha256").update(fs9.readFileSync(zipPath)).digest("hex");
+    if (actualHash !== expectedHash) {
+      throw new Error(
+        `Checksum mismatch for grype ${version3}: expected ${expectedHash}, got ${actualHash}`
+      );
+    }
+    info(`Checksum verified for grype ${version3}`);
   }
   debug(`Zip saved to ${zipPath}`);
   const toolDir = await extractZip(zipPath);
@@ -79653,7 +79694,7 @@ var transitional_default = {
 };
 
 // node_modules/axios/lib/platform/node/index.js
-import crypto5 from "crypto";
+import crypto6 from "crypto";
 
 // node_modules/axios/lib/platform/node/classes/URLSearchParams.js
 import url2 from "url";
@@ -79671,7 +79712,7 @@ var generateString = (size = 16, alphabet = ALPHABET.ALPHA_DIGIT) => {
   let str = "";
   const { length } = alphabet;
   const randomValues = new Uint32Array(size);
-  crypto5.randomFillSync(randomValues);
+  crypto6.randomFillSync(randomValues);
   for (let i = 0; i < size; i++) {
     str += alphabet[randomValues[i] % length];
   }

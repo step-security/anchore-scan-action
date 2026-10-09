@@ -2,6 +2,7 @@ import * as tools from "@actions/tool-cache";
 import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as cache from "@actions/cache";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,10 +13,46 @@ import { GRYPE_VERSION } from "./GrypeVersion.js";
 const grypeVersion = core.getInput("grype-version") || GRYPE_VERSION;
 const grypeExecutableName = isWindows() ? "grype.exe" : "grype";
 
+// parses a checksums file in the standard "<hash>  <filename>" format
+function parseChecksums(content, filename) {
+  for (const line of content.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 2 && parts[1] === filename) {
+      return parts[0];
+    }
+  }
+  return null;
+}
+
 async function downloadGrypeWindowsWorkaround(version) {
   const versionNoV = version.replace(/^v/, "");
-  // example URL: https://github.com/anchore/grype/releases/download/v0.79.2/grype_0.79.2_windows_amd64.zip
-  const url = `https://github.com/anchore/grype/releases/download/${version}/grype_${versionNoV}_windows_amd64.zip`;
+  const archiveFilename = `grype_${versionNoV}_windows_amd64.zip`;
+  const baseUrl = `https://github.com/anchore/grype/releases/download/${version}`;
+  const url = `${baseUrl}/${archiveFilename}`;
+  const checksumsUrl = `${baseUrl}/grype_${versionNoV}_checksums.txt`;
+
+  // fetch checksums before the archive so we can fail fast
+  core.info(`Downloading grype checksums from ${checksumsUrl}`);
+  let checksumsPath;
+  try {
+    checksumsPath = await tools.downloadTool(checksumsUrl);
+  } catch (e) {
+    throw new Error(
+      `Unable to download grype checksums from ${checksumsUrl}: ${describeError(e)}`,
+      { cause: e },
+    );
+  }
+
+  const expectedHash = parseChecksums(
+    fs.readFileSync(checksumsPath, "utf8"),
+    archiveFilename,
+  );
+  if (!expectedHash) {
+    core.warning(
+      `Could not find checksum for ${archiveFilename} in checksums file — skipping verification`,
+    );
+  }
+
   core.info(`Downloading grype from ${url}`);
   let zipPath;
   try {
@@ -26,6 +63,20 @@ async function downloadGrypeWindowsWorkaround(version) {
       { cause: e },
     );
   }
+
+  if (expectedHash) {
+    const actualHash = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(zipPath))
+      .digest("hex");
+    if (actualHash !== expectedHash) {
+      throw new Error(
+        `Checksum mismatch for grype ${version}: expected ${expectedHash}, got ${actualHash}`,
+      );
+    }
+    core.info(`Checksum verified for grype ${version}`);
+  }
+
   core.debug(`Zip saved to ${zipPath}`);
   const toolDir = await tools.extractZip(zipPath);
   core.debug(`Zip extracted to ${toolDir}`);
@@ -52,6 +103,7 @@ function isWindows() {
   return process.platform === "win32";
 }
 
+/* download grype and return a path to the executable */
 /* download grype and return a path to the executable */
 async function downloadGrype(version) {
   const isTag = isReleaseTag(version);
