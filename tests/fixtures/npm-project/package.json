@@ -6,7 +6,7 @@
   "author": "test@test",
   "license": "MIT",
   "dependencies": {
-    "react": "^16.14.0",
+    "react": "^19.3.0",
     "tar": "^6.1.0"
   }
 }
