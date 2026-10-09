@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /.make
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /tests/fixtures/npm-project
+    schedule:
+      interval: daily
+
+  - package-ecosystem: npm
+    directory: /tests/fixtures/yarn-project
+    schedule:
+      interval: daily
