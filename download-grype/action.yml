@@ -1,0 +1,23 @@
+name: "Download Grype"
+author: "Anchore"
+description: "Downloads the Grype binary and provides a path to execute it"
+branding:
+  color: blue
+  icon: check-circle
+inputs:
+  grype-version:
+    description: "A specific version of Grype to install"
+    required: false
+  run:
+    description: "Flag to indicate which sub-action to run"
+    required: false
+    default: "download-grype"
+  cache-db:
+    description: "Cache the Grype DB in GitHub action cache and restore before checking for updates"
+    required: false
+outputs:
+  cmd:
+    description: "An absolute path to the Grype executable"
+runs:
+  using: "node24"
+  main: "../dist/index.js"

@@ -1,1 +1,257 @@
-# anchore-scan-action
+[![StepSecurity Maintained Action](https://raw.githubusercontent.com/step-security/maintained-actions-assets/main/assets/maintained-action-banner.png)](https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions)
+
+# GitHub Action for Vulnerability Scanning
+
+**:zap: _Find threats in files or containers at lightning speed_ :zap:**
+
+[![Test Status][test-img]][test]
+[![GitHub release](https://img.shields.io/github/release/step-security/anchore-scan-action.svg)](https://github.com/step-security/anchore-scan-action/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/step-security/anchore-scan-action/blob/main/LICENSE)
+
+
+This is a GitHub Action for invoking the [Grype](https://github.com/anchore/grype) scanner and returning the vulnerabilities found,
+and optionally fail if a vulnerability is found with a configurable severity level.
+
+Use this in your workflows to quickly verify files or containers' content after a build and before pushing, allowing PRs, or deploying updates.
+
+The action invokes the `grype` command-line tool, with these benefits:
+
+- Runs locally, without sending data outbound - no credentials required!
+- Speedy scan operations
+- Scans both paths and container images
+- Easy failure evaluation depending on vulnerability severity
+
+The example workflows have lots of usage examples for scanning both containers and directories.
+
+By default, a scan will produce very detailed output on system packages like an RPM or DEB, but also language-based packages. These are some of the supported packages and libraries:
+
+Supported Linux Distributions:
+
+- Alpine
+- BusyBox
+- CentOS and RedHat
+- Debian and Debian-based distros like Ubuntu
+
+Supported packages and libraries:
+
+- Ruby Bundles
+- Python Wheel, Egg, `requirements.txt`
+- JavaScript NPM/Yarn
+- Java JAR/EAR/WAR, Jenkins plugins JPI/HPI
+- Go modules
+
+> [!TIP]
+> **Security best practice**: For production workflows, pin actions to a full commit SHA rather than a version tag. You can find the latest SHA for each release on the action's [releases page](https://github.com/step-security/anchore-scan-action/releases).
+
+## Container scanning
+
+The simplest workflow for scanning a `localbuild/testimage` container:
+
+```yaml
+- name: Set up Docker Buildx
+  uses: step-security/setup-buildx-action@v4
+
+- name: build local container
+  uses: step-security/docker-build-push-action@v7
+  with:
+    tags: localbuild/testimage:latest
+    push: false
+    load: true
+
+- name: Scan image
+  uses: step-security/anchore-scan-action@v7
+  with:
+    image: "localbuild/testimage:latest"
+```
+
+## Directory scanning
+
+To scan a directory, add the following step:
+
+```yaml
+- name: Scan current project
+  uses: step-security/anchore-scan-action@v7
+  with:
+    path: "."
+```
+
+The `path` key allows any valid path for the current project. The root of the path (`"."` in this example) is the repository root.
+
+## Scanning an SBOM file
+
+Use the `sbom` key to scan an SBOM file:
+
+```yaml
+- name: Create SBOM
+  uses: step-security/sbom-action@v0
+  with:
+    format: spdx-json
+    output-file: "${{ github.event.repository.name }}-sbom.spdx.json"
+
+- name: Scan SBOM
+  uses: step-security/anchore-scan-action@v7
+  with:
+    sbom: "${{ github.event.repository.name }}-sbom.spdx.json"
+```
+
+## Failing a build on vulnerability severity
+
+By default, if any vulnerability at `medium` or higher is seen, the build fails. To have the build step fail in cases where there are vulnerabilities with a severity level different than the default, set the `severity-cutoff` field to one of `low`, `high`, or `critical`:
+
+With a different severity level:
+
+```yaml
+- name: Scan image
+  uses: step-security/anchore-scan-action@v7
+  with:
+    image: "localbuild/testimage:latest"
+    fail-build: true
+    severity-cutoff: critical
+```
+
+Optionally, change the `fail-build` field to `false` to avoid failing the build regardless of severity:
+
+```yaml
+- name: Scan image
+  uses: step-security/anchore-scan-action@v7
+  with:
+    image: "localbuild/testimage:latest"
+    fail-build: false
+```
+
+### Action Inputs
+
+The inputs `image`, `path`, and `sbom` are mutually exclusive to specify the source to scan; all the other keys are optional. These are all the available keys to configure this action, along with the defaults:
+
+| Input Name          | Description                                                                                                                                                                                                                                                      | Default Value |
+|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `image`             | The image to scan                                                                                                                                                                                                                                                | N/A           |
+| `path`              | The file path to scan                                                                                                                                                                                                                                            | N/A           |
+| `sbom`              | The SBOM to scan                                                                                                                                                                                                                                                 | N/A           |
+| `registry-username` | The registry username to use when authenticating to an external registry                                                                                                                                                                                         |               |
+| `registry-password` | The registry password to use when authenticating to an external registry                                                                                                                                                                                         |               |
+| `fail-build`        | Fail the build if a vulnerability is found with a higher severity. That severity defaults to `medium` and can be set with `severity-cutoff`.                                                                                                                     | `true`        |
+| `output-format`     | Set the output parameter after successful action execution. Valid choices are `json`, `sarif`, `cyclonedx-xml`, `cyclonedx-json`, and `table`; where `table` output will also display in the logs.                                                               | `sarif`       |
+| `output-file`       | File to output the Grype scan results to. Defaults to a file in the system temp directory, available in the action outputs                                                                                                                                       |               |
+| `severity-cutoff`   | Optionally specify the minimum vulnerability severity to trigger a failure. Valid choices are "negligible", "low", "medium", "high" and "critical". Any vulnerability with a severity less than this value will lead to a "warning" result. Default is "medium". | `medium`      |
+| `only-fixed`        | Specify whether to only report vulnerabilities that have a fix available.                                                                                                                                                                                        | `false`       |
+| `add-cpes-if-none`  | Specify whether to autogenerate missing CPEs.                                                                                                                                                                                                                    | `false`       |
+| `by-cve`            | Specify whether to orient results by CVE rather than GHSA.                                                                                                                                                                                                       | `false`       |
+| `vex`               | Specify a list of VEX documents to consider when producing scanning results.                                                                                                                                                                                     | `false`       |
+| `cache-db`          | Cache the Grype DB in GitHub action cache and restore before checking for updates                                                                                                                                                                                | `false`       |
+| `grype-version`     | An optional Grype version to download, defaults to the pinned version in [GrypeVersion.js](GrypeVersion.js).                                                                                                                                                     |               |
+| `config`            | Optional Grype configuration files (newline-separated). Setting this will disable auto-detection of configuration files (e.g. .grype.yaml) - only the specified files will be loaded..                                                                           |               |
+
+### Action Outputs
+
+| Output Name      | Description                                                                    | Type   |
+|------------------|--------------------------------------------------------------------------------|--------|
+| `sarif`          | Path to the SARIF report file, if `output-format` is `sarif`                   | string |
+| `json`           | Path to the report file , if `output-format` is `json`                         | string |
+| `cyclonedx-xml`  | Path to the CycloneDX report file, if `output-format` is `cyclonedx`           | string |
+| `cyclonedx-json` | Path to the CycloneDX JSON report file, if `output-format` is `cyclonedx-json` | string |
+
+### Example Workflows
+
+Assuming your repository has a Dockerfile in the root directory:
+
+```yaml
+name: Container Image CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the container image
+        run: docker build . --file Dockerfile --tag localbuild/testimage:latest
+      - uses: step-security/anchore-scan-action@v7
+        with:
+          image: "localbuild/testimage:latest"
+          fail-build: true
+```
+
+Same example as above, but with SARIF output format - as is the default, the action will generate a SARIF report, which can be uploaded and then displayed as a Code Scanning Report in the GitHub UI.
+
+> :bulb: Code Scanning is a Github service that is currently in Beta. [Follow the instructions on how to enable this service for your project](https://docs.github.com/en/free-pro-team@latest/github/finding-security-vulnerabilities-and-errors-in-your-code/enabling-code-scanning-for-a-repository).
+
+```yaml
+name: Container Image CI
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Permissions key is required for CodeQL SARIF Upload, per the docs:
+    # https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/uploading-a-sarif-file-to-github
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the Container image
+        run: docker build . --file Dockerfile --tag localbuild/testimage:latest
+      - uses: step-security/anchore-scan-action@v7
+        id: scan
+        with:
+          image: "localbuild/testimage:latest"
+      - name: upload Anchore scan SARIF report
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+```
+
+Optionally, you can add a step to inspect the SARIF report produced:
+
+```yaml
+- name: Inspect action SARIF report
+  run: cat ${{ steps.scan.outputs.sarif }}
+```
+
+## Additional configuration
+
+You may add a `.grype.yaml` file at your repository root
+for more [Grype configuration](https://github.com/anchore/grype#configuration)
+such as [ignoring certain matches](https://github.com/anchore/grype#specifying-matches-to-ignore).
+
+## step-security/anchore-scan-action/download-grype
+
+A sub-action to [download Grype](download-grype/action.yml) and optionally cache the Grype DB.
+
+Input parameters:
+
+| Parameter       | Description                                                                                                  | Default |
+|-----------------|--------------------------------------------------------------------------------------------------------------|---------|
+| `grype-version` | An optional Grype version to download, defaults to the pinned version in [GrypeVersion.js](GrypeVersion.js). |         |
+| `cache-db`      | Cache the Grype DB in GitHub action cache and restore before checking for updates                            | `false` |
+
+Output parameters:
+
+| Parameter | Description                                                          |
+| --------- | -------------------------------------------------------------------- |
+| `cmd`     | a reference to the [Grype](https://github.com/anchore/grype) binary. |
+
+`cmd` can be referenced in a workflow like other output parameters:
+`${{ steps.<step-id>.outputs.cmd }}`
+
+Example usage:
+
+```yaml
+- uses: step-security/anchore-scan-action/download-grype@v7
+  id: grype
+- run: ${{steps.grype.outputs.cmd}} dir:.
+```
+
+
+## More Information
+
+For documentation on Grype itself, including other output capabilities, see the [grype project](https://github.com/anchore/grype)
+
+Connect with the community directly on [Discourse](https://anchore.com/discourse).
+
+[test]: https://github.com/step-security/anchore-scan-action
+[test-img]: https://github.com/step-security/anchore-scan-action/workflows/Tests/badge.svg
+
+## Diagnostics
+
+This action makes extensive use of GitHub Action debug logging,
+which can be enabled as [described here](https://github.com/actions/toolkit/blob/master/docs/action-debugging.md)
+by setting a secret in your repository of `ACTIONS_STEP_DEBUG` to `true`.
